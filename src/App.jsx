@@ -1332,13 +1332,21 @@ function SpecialSection({ bills, addBill, deleteBill, user, isAdmin, spark }) {
 function BillList({ bills, deleteBill, isAdmin }) {
   return (
     <div>
-      {[...bills].reverse().map((b, bi) => {
-        const mc = MC[b.paid_by] || MC.Admin;
+      {[...bills].reverse().map((b) => {
+        const isMultiContrib = b.paid_by?.includes("+") && b.splits && Object.keys(b.splits).length > 0;
+        const mc = isMultiContrib ? MC.Admin : (MC[b.paid_by] || MC.Admin);
         return <div key={b.id} className="card fu" style={{ padding:"13px 14px", marginBottom:9, border:`1.5px solid ${mc.bg}33` }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:7 }}>
             <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
               {b.bill_no && <span style={{ padding:"3px 9px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>#{b.bill_no}</span>}
-              <span style={{ padding:"3px 9px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>{b.paid_by}</span>
+              {isMultiContrib
+                ? Object.entries(b.splits).filter(([m]) => MEMBERS.includes(m)).map(([m, v]) => (
+                    <span key={m} style={{ padding:"3px 9px", borderRadius:20, background:MC[m].light, color:MC[m].text, fontSize:11, fontWeight:700 }}>
+                      {m}: {fmt$(v)}
+                    </span>
+                  ))
+                : <span style={{ padding:"3px 9px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>{b.paid_by}</span>
+              }
               <span style={{ fontSize:11, color:"#94a3b8" }}>{fmtD(b.date)}</span>
             </div>
             <div style={{ display:"flex", gap:8, alignItems:"center" }}>
@@ -1352,7 +1360,7 @@ function BillList({ bills, deleteBill, isAdmin }) {
               <span>{it.name}</span><span>{fmt$(it.amount)}</span>
             </div>
           ))}
-          {b.note && <div style={{ marginTop:6, fontSize:12, color:"#d97706", fontStyle:"italic" }}>📝 {b.note}</div>}
+          {b.note && !isMultiContrib && <div style={{ marginTop:6, fontSize:12, color:"#d97706", fontStyle:"italic" }}>📝 {b.note}</div>}
         </div>;
       })}
     </div>
@@ -1611,11 +1619,26 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
   const share = Object.fromEntries(MEMBERS.map(m => [m, 0]));
 
   bills.forEach(b => {
-    paid[b.paid_by] = (paid[b.paid_by]||0) + Number(b.total);
-    const hasSplits = b.splits && Object.keys(b.splits).filter(k => parseFloat(b.splits[k])>0).length > 0;
-    if (hasSplits) {
-      Object.entries(b.splits).forEach(([m, v]) => { share[m] = (share[m]||0) + parseFloat(v); });
+    const isMultiContrib = b.paid_by?.includes("+") && b.splits && Object.keys(b.splits).length > 0;
+    if (isMultiContrib) {
+      // Multi-contributor: splits = kasle kati tiryo
+      Object.entries(b.splits).forEach(([m, v]) => {
+        if (MEMBERS.includes(m)) paid[m] = (paid[m]||0) + parseFloat(v||0);
+      });
     } else {
+      paid[b.paid_by] = (paid[b.paid_by]||0) + Number(b.total);
+    }
+    // Share: sabai 4 janako equal share (multi-contrib ma split = payment, share xuttai)
+    if (!isMultiContrib) {
+      const hasSplits = b.splits && Object.keys(b.splits).filter(k => parseFloat(b.splits[k])>0).length > 0;
+      if (hasSplits) {
+        Object.entries(b.splits).forEach(([m, v]) => { share[m] = (share[m]||0) + parseFloat(v); });
+      } else {
+        const perPerson = Number(b.total) / MEMBERS.length;
+        MEMBERS.forEach(m => { share[m] = (share[m]||0) + perPerson; });
+      }
+    } else {
+      // Multi-contrib: equal share among all members
       const perPerson = Number(b.total) / MEMBERS.length;
       MEMBERS.forEach(m => { share[m] = (share[m]||0) + perPerson; });
     }
