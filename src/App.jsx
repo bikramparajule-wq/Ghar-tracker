@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════════════════
-//  GHAR.SYS  v9.0  |  Hamro Ghar Ko Complete App
+//  GHAR.SYS  v10.0  |  Hamro Ghar Ko Complete App  — FINAL
 //  ─────────────────────────────────────────────────────────────────────
 //  ⚠️  SUPABASE SETUP — Run this SQL ONCE in your Supabase SQL Editor:
 //
@@ -397,7 +397,25 @@ export default function App() {
         tm[r.date][`${r.task_id}_${r.member}`] = val;
       });
       setTasks(tm);
-      setBills((rawBills || []).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
+      // Backfill bill_no globally (GR-001, EL-002, SP-003... one sequence for all)
+      const sortedBills = (rawBills || []).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      let globalCounter = 0;
+      // First pass: find max existing number
+      sortedBills.forEach(b => {
+        if (b.bill_no) {
+          const n = parseInt(b.bill_no.split("-")[1] || "0");
+          if (!isNaN(n)) globalCounter = Math.max(globalCounter, n);
+        }
+      });
+      const backfilled = sortedBills.map(b => {
+        if (b.bill_no) return b;
+        const prefix = b.cat === "Groceries" ? "GR" : b.cat === "Electricity" ? "EL" : "SP";
+        globalCounter++;
+        const bill_no = `${prefix}-${globalCounter.toString().padStart(3, "0")}`;
+        db.patch("bills", { id: b.id }, { bill_no });
+        return { ...b, bill_no };
+      });
+      setBills(backfilled);
       setNoteRaw(rawNotes?.[0]?.content || "");
       setGrocery(rawGrocery || []);
       setTNotes(rawTNotes || []);
@@ -450,10 +468,10 @@ export default function App() {
   };
 
   const addBill = async bill => {
-    // Generate bill number: GR-001, EL-002, SP-003 etc.
+    // Global sequential numbering: GR-001, EL-002, SP-003, GR-004...
     const prefix = bill.cat === "Groceries" ? "GR" : bill.cat === "Electricity" ? "EL" : "SP";
-    const existing = bills.filter(b => b.bill_no?.startsWith(prefix));
-    const nextNum = (existing.length + 1).toString().padStart(3, "0");
+    const allNums = bills.map(b => parseInt(b.bill_no?.split("-")[1] || "0")).filter(n => !isNaN(n));
+    const nextNum = ((allNums.length > 0 ? Math.max(...allNums) : 0) + 1).toString().padStart(3, "0");
     const bill_no = `${prefix}-${nextNum}`;
     const res = await db.upsert("bills", { ...bill, bill_no, created_at: new Date().toISOString() });
     if (res?.[0]) setBills(p => [...p, res[0]]);
@@ -744,15 +762,33 @@ function TaskCard({ task, td, date, canMark, toggleTask, delay, isAdmin, isWeekl
         </div>
       )}
       {isWeekly && (
-        <button className="btn" onClick={onWeeklyOpen}
-          style={{ width:"100%", padding:"9px", borderRadius:10, background: done ? dc.light : "#f8fafc",
-            border:`1.5px solid ${done ? dc.bg+"44" : "#e2e8f0"}`, color: done ? dc.text : "#64748b", fontSize:13, fontWeight:700 }}>
-          {done ? (() => {
-            const count = td[`${task.id}_${done}`];
-            const n = typeof count === "number" ? count : 1;
-            return `✓ ${done} le garyo (${n}x) — Badla Garne?`;
-          })() : "Kasle Garyo? Click Gara →"}
-        </button>
+        <div onClick={onWeeklyOpen} style={{ cursor:"pointer" }}>
+          {(() => {
+            const doers = MEMBERS.map(m => {
+              const raw = td[`${task.id}_${m}`];
+              const count = typeof raw === "number" ? raw : raw ? 1 : 0;
+              return { m, count };
+            }).filter(x => x.count > 0);
+            if (doers.length === 0) return (
+              <button className="btn" style={{ width:"100%", padding:"9px", borderRadius:10,
+                background:"#f8fafc", border:"1.5px solid #e2e8f0", color:"#64748b", fontSize:13, fontWeight:700 }}>
+                Kasle Garyo? Click Gara →
+              </button>
+            );
+            return (
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                {doers.map(({ m, count }) => {
+                  const mc = MC[m];
+                  return <span key={m} style={{ padding:"5px 11px", borderRadius:20, background:mc.bg,
+                    color:"white", fontSize:12, fontWeight:800, boxShadow:`0 2px 8px ${mc.glow}` }}>
+                    ✓ {m} ({count}x)
+                  </span>;
+                })}
+                <span style={{ fontSize:11, color:"#94a3b8", fontWeight:700, marginLeft:2 }}>— Badla Garne?</span>
+              </div>
+            );
+          })()}
+        </div>
       )}
     </div>
   );
@@ -1558,23 +1594,43 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
             ))}
           </div>
         )}
-        {/* Bill Numbers by Category */}
+        {/* Bill Numbers by Category — with date & amount */}
         {["Groceries","Electricity","Special"].map(cat => {
           const catBills = bills.filter(b => b.cat === cat && b.bill_no);
           if (catBills.length === 0) return null;
           const catColor = CC[cat]; const catIcon = CI[cat];
+          const [expanded, setExpanded] = React.useState(false);
           return <div key={cat} className="card fu2" style={{ padding:14, marginBottom:10, border:`1.5px solid ${catColor}33` }}>
-            <div style={{ fontSize:11, color:catColor, letterSpacing:2, fontWeight:800, marginBottom:8 }}>{catIcon} {cat.toUpperCase()} BILLS</div>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, cursor:"pointer" }}
+              onClick={() => setExpanded(x => !x)}>
+              <div style={{ fontSize:11, color:catColor, letterSpacing:2, fontWeight:800 }}>{catIcon} {cat.toUpperCase()} — {catBills.length} bills</div>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(catBills.reduce((s,b) => s+Number(b.total), 0))}</span>
+                <span style={{ fontSize:12, color:"#94a3b8" }}>{expanded ? "▲" : "▼"}</span>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom: expanded ? 10 : 0 }}>
               {catBills.map(b => (
                 <span key={b.id} style={{ padding:"4px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>
                   #{b.bill_no} <span style={{ opacity:.65, fontWeight:600 }}>{fmt$(b.total)}</span>
                 </span>
               ))}
             </div>
-            <div style={{ fontSize:11, color:catColor, fontWeight:800, marginTop:8 }}>
-              Jamma: {fmt$(catBills.reduce((s,b) => s+Number(b.total), 0))}
-            </div>
+            {expanded && (
+              <div style={{ borderTop:`1px solid ${catColor}22`, paddingTop:10, display:"flex", flexDirection:"column", gap:6 }}>
+                {catBills.map(b => (
+                  <div key={b.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+                    padding:"8px 10px", borderRadius:10, background:`${catColor}08`, border:`1px solid ${catColor}22` }}>
+                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                      <span style={{ padding:"2px 8px", borderRadius:20, background:"#1e293b", color:"white", fontSize:10, fontWeight:900, letterSpacing:1 }}>#{b.bill_no}</span>
+                      <span style={{ fontSize:11, color:"#64748b" }}>{fmtD(b.date)}</span>
+                      {b.paid_by && <span style={{ fontSize:11, color:MC[b.paid_by]?.text||"#94a3b8", fontWeight:700 }}>{b.paid_by}</span>}
+                    </div>
+                    <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(b.total)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>;
         })}
         {msg && <div style={{ padding:"12px 16px", borderRadius:12, background:"#dcfce7", border:"1.5px solid #86efac", color:"#16a34a", fontSize:13, fontWeight:700, marginBottom:12, textAlign:"center" }}>{msg}</div>}
