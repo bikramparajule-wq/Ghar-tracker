@@ -15,9 +15,12 @@
 //  CREATE TABLE IF NOT EXISTS settlements (
 //    id bigserial primary key, label text,
 //    paid jsonb, shares jsonb, balances jsonb, total numeric,
-//    period_start text, period_end text,
+//    period_start text, period_end text, bill_nos jsonb,
 //    settled_by text, settled_at timestamptz default now()
 //  );
+//  -- ADD these columns if tables already exist:
+//  ALTER TABLE bills ADD COLUMN IF NOT EXISTS bill_no text;
+//  ALTER TABLE tasks ADD COLUMN IF NOT EXISTS count integer default 0;
 //  -- Enable Realtime for grocery_items, task_notes, settlements in dashboard
 // ══════════════════════════════════════════════════════════════════════
 
@@ -388,7 +391,11 @@ export default function App() {
         db.get("grocery_items"), db.get("task_notes"), db.get("settlements")
       ]);
       const tm = {};
-      (rawTasks || []).forEach(r => { if (!tm[r.date]) tm[r.date] = {}; tm[r.date][`${r.task_id}_${r.member}`] = r.done_by || null; });
+      (rawTasks || []).forEach(r => {
+        if (!tm[r.date]) tm[r.date] = {};
+        const val = r.count > 1 ? r.count : (r.done_by || null);
+        tm[r.date][`${r.task_id}_${r.member}`] = val;
+      });
       setTasks(tm);
       setBills((rawBills || []).sort((a, b) => new Date(a.created_at) - new Date(b.created_at)));
       setNoteRaw(rawNotes?.[0]?.content || "");
@@ -421,8 +428,16 @@ export default function App() {
     setTimeout(() => setSparks(p => p.filter(s => s.id !== id)), 900);
   };
 
-  const toggleTask = async (date, taskId, member, e) => {
+  const toggleTask = async (date, taskId, member, e, countOverride) => {
     const key = `${taskId}_${member}`, curr = tasks[date]?.[key];
+    // If countOverride provided (weekly multi-entry), store the count
+    if (countOverride !== undefined) {
+      const newVal = countOverride <= 0 ? null : countOverride;
+      if (newVal && e) spark(e, MC[member].bg);
+      setTasks(p => ({ ...p, [date]: { ...p[date], [key]: newVal } }));
+      await db.upsert("tasks", { date, task_id: taskId, member, done_by: newVal ? member : null, count: newVal || 0 });
+      return;
+    }
     if (!curr && e) spark(e, MC[member].bg);
     setTasks(p => ({ ...p, [date]: { ...p[date], [key]: curr ? null : member } }));
     await db.upsert("tasks", { date, task_id: taskId, member, done_by: curr ? null : member });
@@ -435,7 +450,12 @@ export default function App() {
   };
 
   const addBill = async bill => {
-    const res = await db.upsert("bills", { ...bill, created_at: new Date().toISOString() });
+    // Generate bill number: GR-001, EL-002, SP-003 etc.
+    const prefix = bill.cat === "Groceries" ? "GR" : bill.cat === "Electricity" ? "EL" : "SP";
+    const existing = bills.filter(b => b.bill_no?.startsWith(prefix));
+    const nextNum = (existing.length + 1).toString().padStart(3, "0");
+    const bill_no = `${prefix}-${nextNum}`;
+    const res = await db.upsert("bills", { ...bill, bill_no, created_at: new Date().toISOString() });
     if (res?.[0]) setBills(p => [...p, res[0]]);
     else loadAll();
   };
@@ -631,27 +651,34 @@ function AajaTab({ tasks, toggleTask, user, isAdmin, perms, noteData, saveNote, 
       {/* Weekly Task Modal */}
       {weeklyTask && (
         <Modal title={`${weeklyTask.icon} ${weeklyTask.label}`} onClose={() => setWeekly(null)}>
-          <div style={{ marginBottom:14, color:"#64748b", fontSize:13 }}>Kasle garyo yo hapta?</div>
-          <div style={{ display:"flex", gap:9, flexWrap:"wrap" }}>
+          <div style={{ marginBottom:14, color:"#64748b", fontSize:13 }}>Kasle kati palta garyo yo hapta? (+/- thichera count garna sakcha)</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:9 }}>
             {MEMBERS.map(m => {
-              const mDone = td[`${weeklyTask.id}_${m}`];
-              return canMark(m) ? (
-                <button key={m} className="btn" onClick={e => { toggleTask(selDate, weeklyTask.id, m, e); setWeekly(null); }}
-                  style={{ padding:"12px 18px", borderRadius:12, fontSize:14, fontWeight:800,
-                    background: mDone ? MC[m].bg : MC[m].light, color: mDone ? "white" : MC[m].text,
-                    border:`1.5px solid ${mDone ? MC[m].bg : MC[m].bg+"44"}`,
-                    boxShadow: mDone ? `0 4px 14px ${MC[m].glow}` : "" }}>
-                  {mDone ? "✓ " : ""}{m}
-                </button>
-              ) : (
-                <div key={m} style={{ padding:"12px 18px", borderRadius:12, fontSize:14, fontWeight:800,
-                  background: mDone ? MC[m].bg : "#f1f5f9", color: mDone ? "white" : "#94a3b8",
-                  border:"1.5px solid #e2e8f0", opacity:.6 }}>
-                  {mDone ? "✓ " : ""}{m}
+              const key = `${weeklyTask.id}_${m}`;
+              const raw = td[key];
+              const count = typeof raw === "number" ? raw : raw ? 1 : 0;
+              const mc = MC[m];
+              return (
+                <div key={m} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 14px", borderRadius:12,
+                  background: count > 0 ? mc.light : "#f8fafc", border:`1.5px solid ${count > 0 ? mc.bg+"55" : "#e2e8f0"}` }}>
+                  <span style={{ fontSize:14, fontWeight:800, color: count > 0 ? mc.text : "#94a3b8" }}>{m}</span>
+                  <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                    {count > 0 && <span style={{ fontSize:13, fontWeight:700, color:mc.text }}>{count}x ✓</span>}
+                    {canMark(m) && <>
+                      {count > 0 && <button className="btn" onClick={() => toggleTask(selDate, weeklyTask.id, m, null, count - 1)}
+                        style={{ width:32, height:32, borderRadius:9, background:"#fee2e2", border:"1.5px solid #fca5a5", color:"#ef4444", fontSize:16, fontWeight:900 }}>−</button>}
+                      <button className="btn" onClick={e => toggleTask(selDate, weeklyTask.id, m, e, count + 1)}
+                        style={{ width:32, height:32, borderRadius:9, background:mc.bg, color:"white", fontSize:16, fontWeight:900, boxShadow:`0 3px 10px ${mc.glow}` }}>+</button>
+                    </>}
+                  </div>
                 </div>
               );
             })}
           </div>
+          <button className="btn" onClick={() => setWeekly(null)}
+            style={{ width:"100%", padding:"12px", borderRadius:12, background:"#1e293b", color:"white", fontSize:14, fontWeight:800, marginTop:16 }}>
+            Thik xa ✓
+          </button>
         </Modal>
       )}
 
@@ -720,7 +747,11 @@ function TaskCard({ task, td, date, canMark, toggleTask, delay, isAdmin, isWeekl
         <button className="btn" onClick={onWeeklyOpen}
           style={{ width:"100%", padding:"9px", borderRadius:10, background: done ? dc.light : "#f8fafc",
             border:`1.5px solid ${done ? dc.bg+"44" : "#e2e8f0"}`, color: done ? dc.text : "#64748b", fontSize:13, fontWeight:700 }}>
-          {done ? `✓ ${done} le garyo — Badla Garne?` : "Kasle Garyo? Click Gara →"}
+          {done ? (() => {
+            const count = td[`${task.id}_${done}`];
+            const n = typeof count === "number" ? count : 1;
+            return `✓ ${done} le garyo (${n}x) — Badla Garne?`;
+          })() : "Kasle Garyo? Click Gara →"}
         </button>
       )}
     </div>
@@ -826,16 +857,16 @@ function KharchaTab({ bills, addBill, deleteBill, updateBill, user, isAdmin, spa
   return (
     <div>
       <SubTabs tabs={subTabs} active={sub} onChange={setSub} color="#0369a1" colorLight="#e0f2fe"/>
-      {sub === "groceries"   && <GroceriesForm bills={filteredBills} allBills={bills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
-      {sub === "electricity" && <ElectricitySection bills={filteredBills} allBills={bills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin}/>}
-      {sub === "special"     && <SpecialSection bills={filteredBills} allBills={bills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
-      {sub === "history"     && <BillHistory bills={bills} allBills={bills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
+      {sub === "groceries"   && <GroceriesForm bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
+      {sub === "electricity" && <ElectricitySection bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin}/>}
+      {sub === "special"     && <SpecialSection bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
+      {sub === "history"     && <BillHistory bills={bills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
     </div>
   );
 }
 
 /* ─── GROCERIES FORM ──────────────────────────────────────────────── */
-function GroceriesForm({ bills, allBills, addBill, deleteBill, user, isAdmin, spark }) {
+function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
   const [items, setItems]       = useState([{ name: "", amount: "" }]);
   const [paidBy, setPaid]       = useState(user !== "Admin" ? user : MEMBERS[0]);
   const [splits, setSplits]     = useState({});
@@ -999,13 +1030,13 @@ function GroceriesForm({ bills, allBills, addBill, deleteBill, user, isAdmin, sp
           </button>
         </div>
       </div>
-      {bills.length > 0 && <BillList bills={bills} allBills={allBills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
+      {bills.length > 0 && <BillList bills={bills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
     </div>
   );
 }
 
 /* ─── ELECTRICITY SECTION ─────────────────────────────────────────── */
-function ElectricitySection({ bills, allBills, addBill, deleteBill, user, isAdmin }) {
+function ElectricitySection({ bills, addBill, deleteBill, user, isAdmin }) {
   const [entries, setEntries] = useState([{ member: user !== "Admin" ? user : MEMBERS[0], amount: "" }]);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1067,16 +1098,13 @@ function ElectricitySection({ bills, allBills, addBill, deleteBill, user, isAdmi
           <Divider label="ELECTRICITY RECORDS"/>
           {[...bills].reverse().map(b => {
             const mc = MC[b.paid_by] || MC.Admin;
-            const bNum = (allBills||bills).findIndex(x => x.id === b.id) + 1;
             return <div key={b.id} className="card" style={{ padding:"12px 14px", marginBottom:9, border:`1.5px solid #fde68a` }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                 <div>
-                  <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom:4 }}>
-                    <span style={{ padding:"2px 7px", borderRadius:8, background:"#1e293b", color:"white", fontSize:10, fontWeight:900 }}>#{bNum}</span>
-                    <span style={{ padding:"3px 9px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>{b.paid_by}</span>
-                    <span style={{ fontSize:11, color:"#94a3b8" }}>{fmtD(b.date)}</span>
-                  </div>
-                  {b.note && <span style={{ fontSize:11, color:"#d97706" }}>· {b.note}</span>}
+                  {b.bill_no && <span style={{ padding:"3px 9px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1, marginRight:5 }}>#{b.bill_no}</span>}
+                  <span style={{ padding:"3px 9px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>{b.paid_by}</span>
+                  <span style={{ fontSize:11, color:"#94a3b8", marginLeft:7 }}>{fmtD(b.date)}</span>
+                  {b.note && <span style={{ fontSize:11, color:"#d97706", marginLeft:7 }}>· {b.note}</span>}
                 </div>
                 <div style={{ display:"flex", gap:8, alignItems:"center" }}>
                   <span style={{ fontSize:17, fontWeight:900, color:"#d97706" }}>{fmt$(b.total)}</span>
@@ -1093,7 +1121,7 @@ function ElectricitySection({ bills, allBills, addBill, deleteBill, user, isAdmi
 }
 
 /* ─── SPECIAL SECTION ─────────────────────────────────────────────── */
-function SpecialSection({ bills, allBills, addBill, deleteBill, user, isAdmin, spark }) {
+function SpecialSection({ bills, addBill, deleteBill, user, isAdmin, spark }) {
   const [selMembers, setSelMembers] = useState([]);
   const [desc, setDesc] = useState("");
   const [totalAmt, setTotalAmt] = useState("");
@@ -1175,13 +1203,12 @@ function SpecialSection({ bills, allBills, addBill, deleteBill, user, isAdmin, s
           {[...bills].reverse().map(b => {
             const mc = MC[b.paid_by] || MC.Admin;
             const members = b.note?.replace("Members: ","")?.split(", ") || [];
-            const bNum = (allBills||bills).findIndex(x => x.id === b.id) + 1;
             return <div key={b.id} className="card" style={{ padding:"13px 15px", marginBottom:9, border:"1.5px solid #fbcfe8" }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6 }}>
                 <div>
-                  <div style={{ display:"flex", gap:6, alignItems:"center", marginBottom:5 }}>
-                    <span style={{ padding:"2px 7px", borderRadius:8, background:"#1e293b", color:"white", fontSize:10, fontWeight:900 }}>#{bNum}</span>
-                    <span style={{ fontSize:14, fontWeight:800, color:"#db2777" }}>{b.items?.[0]?.name || "Special"}</span>
+                  <div style={{ fontSize:14, fontWeight:800, color:"#db2777", marginBottom:3 }}>
+                    {b.bill_no && <span style={{ fontSize:11, fontWeight:900, color:"white", background:"#1e293b", padding:"2px 8px", borderRadius:20, marginRight:7, letterSpacing:1 }}>#{b.bill_no}</span>}
+                    {b.items?.[0]?.name || "Special"}
                   </div>
                   <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
                     <span style={{ padding:"2px 8px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>Paid: {b.paid_by}</span>
@@ -1213,16 +1240,15 @@ function SpecialSection({ bills, allBills, addBill, deleteBill, user, isAdmin, s
 }
 
 /* ─── BILL LIST ───────────────────────────────────────────────────── */
-function BillList({ bills, allBills, deleteBill, isAdmin }) {
+function BillList({ bills, deleteBill, isAdmin }) {
   return (
     <div>
       {[...bills].reverse().map((b, bi) => {
         const mc = MC[b.paid_by] || MC.Admin;
-        const bNum = (allBills||bills).findIndex(x => x.id === b.id) + 1;
         return <div key={b.id} className="card fu" style={{ padding:"13px 14px", marginBottom:9, border:`1.5px solid ${mc.bg}33` }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:7 }}>
             <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
-              <span style={{ padding:"2px 7px", borderRadius:8, background:"#1e293b", color:"white", fontSize:10, fontWeight:900 }}>#{bNum}</span>
+              {b.bill_no && <span style={{ padding:"3px 9px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>#{b.bill_no}</span>}
               <span style={{ padding:"3px 9px", borderRadius:20, background:mc.light, color:mc.text, fontSize:11, fontWeight:700 }}>{b.paid_by}</span>
               <span style={{ fontSize:11, color:"#94a3b8" }}>{fmtD(b.date)}</span>
             </div>
@@ -1245,7 +1271,7 @@ function BillList({ bills, allBills, deleteBill, isAdmin }) {
 }
 
 /* ─── BILL HISTORY ────────────────────────────────────────────────── */
-function BillHistory({ bills, allBills, deleteBill, isAdmin }) {
+function BillHistory({ bills, deleteBill, isAdmin }) {
   const [filter, setFilter] = useState("All");
   const filtered = filter === "All" ? bills : bills.filter(b => b.cat === filter || b.paid_by === filter);
   return (
@@ -1260,7 +1286,7 @@ function BillHistory({ bills, allBills, deleteBill, isAdmin }) {
         ))}
       </div>
       {filtered.length===0 && <div style={{ textAlign:"center", color:"#cbd5e1", padding:48, fontSize:14 }}>Kei bill xaina 📭</div>}
-      <BillList bills={filtered} allBills={allBills||bills} deleteBill={deleteBill} isAdmin={isAdmin}/>
+      <BillList bills={filtered} deleteBill={deleteBill} isAdmin={isAdmin}/>
     </div>
   );
 }
@@ -1281,7 +1307,10 @@ function ReportTab({ tasks, bills, settlements, addSettlement, user, isAdmin }) 
   const taskCounts = Object.fromEntries(MEMBERS.map(m => [m, 0]));
   Object.entries(tasks).forEach(([date, dt]) => {
     if (!inRange(date)) return;
-    Object.values(dt).forEach(v => { if (v && taskCounts[v] !== undefined) taskCounts[v]++; });
+    Object.entries(dt).forEach(([k, v]) => { if (v && taskCounts[v] !== undefined) taskCounts[v]++; else if (v && typeof v === "number") {
+      // numeric count — find member from key
+      const m = k.split("_").pop(); if (m && taskCounts[m] !== undefined) taskCounts[m] += v;
+    }});
   });
   const totalTasks = Object.values(taskCounts).reduce((s, v) => s + v, 0);
   const taskSorted = [...MEMBERS].sort((a, b) => taskCounts[b] - taskCounts[a]);
@@ -1377,7 +1406,10 @@ function KaamSection({ tasks, taskCounts, taskSorted, totalTasks, medals, inRang
           const who = Object.fromEntries(MEMBERS.map(m => [m, 0]));
           Object.entries(tasks).forEach(([date, dt]) => {
             if (!inRange(date)) return;
-            MEMBERS.forEach(m => { if (dt[`${task.id}_${m}`]) who[m]++; });
+    MEMBERS.forEach(m => { 
+      const val = dt[`${task.id}_${m}`];
+      if (val) who[m] += (typeof val === "number" ? val : 1); 
+    });
           });
           const tt = Object.values(who).reduce((s,v) => s+v, 0);
           return <div key={task.id} style={{ marginBottom:12 }}>
@@ -1477,11 +1509,13 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
   const settle = async () => {
     if (!isAdmin) return;
     setSettling(true);
+    const bill_nos = bills.filter(b => b.bill_no).map(b => b.bill_no);
     await addSettlement({
       label: `Settlement ${new Date().toLocaleDateString("en-GB")}`,
       paid, shares: share, balances: balance, total: bills.reduce((s, b) => s + Number(b.total), 0),
       period_start: bills.length > 0 ? bills[0].date : today(),
       period_end: today(),
+      bill_nos,
     });
     setMsg("✅ Settlement complete! Naya hisab suruu!");
     setTimeout(() => setMsg(""), 3000);
@@ -1492,33 +1526,7 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
     <div>
       {bills.length === 0 && <div style={{ textAlign:"center", color:"#94a3b8", padding:40, fontSize:14 }}>Sabai settle bhaisakyo 🎉</div>}
       {bills.length > 0 && <>
-        {/* Bill breakdown by category */}
         <div className="card fu" style={{ padding:18, marginBottom:12 }}>
-          <div style={{ fontSize:11, color:"#64748b", letterSpacing:3, marginBottom:12, fontWeight:700 }}>BILL BREAKDOWN BY CATEGORY</div>
-          {["Groceries","Electricity","Special"].map(cat => {
-            const catBills = bills.filter(b => b.cat === cat);
-            if (catBills.length === 0) return null;
-            const color = CC[cat]; const icon = CI[cat];
-            return <div key={cat} style={{ marginBottom:12 }}>
-              <div style={{ fontSize:11, color, letterSpacing:2, fontWeight:700, marginBottom:7 }}>{icon} {cat.toUpperCase()} ({catBills.length} bills)</div>
-              <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-                {catBills.map(b => {
-                  const bNum = bills.findIndex(x => x.id === b.id) + 1;
-                  const mc = MC[b.paid_by]||MC.Admin;
-                  return <div key={b.id} style={{ padding:"5px 10px", borderRadius:10, background:"#f8fafc", border:`1.5px solid ${color}44`, fontSize:11 }}>
-                    <span style={{ fontWeight:900, color:"#1e293b" }}>#{bNum}</span>
-                    <span style={{ color:mc.text, fontWeight:700, marginLeft:5 }}>{b.paid_by}</span>
-                    <span style={{ color, fontWeight:800, marginLeft:5 }}>{fmt$(b.total)}</span>
-                  </div>;
-                })}
-              </div>
-              <div style={{ fontSize:12, fontWeight:800, color, marginTop:6 }}>
-                Subtotal: {fmt$(catBills.reduce((s,b) => s+Number(b.total),0))}
-              </div>
-            </div>;
-          })}
-        </div>
-        <div className="card fu1" style={{ padding:18, marginBottom:12 }}>
           <div style={{ fontSize:11, color:"#64748b", letterSpacing:3, marginBottom:14, fontWeight:700 }}>NET BALANCE</div>
           {MEMBERS.map(m => {
             const b = balance[m]; const mc = MC[m];
@@ -1550,8 +1558,26 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
             ))}
           </div>
         )}
+        {/* Bill Numbers by Category */}
+        {["Groceries","Electricity","Special"].map(cat => {
+          const catBills = bills.filter(b => b.cat === cat && b.bill_no);
+          if (catBills.length === 0) return null;
+          const catColor = CC[cat]; const catIcon = CI[cat];
+          return <div key={cat} className="card fu2" style={{ padding:14, marginBottom:10, border:`1.5px solid ${catColor}33` }}>
+            <div style={{ fontSize:11, color:catColor, letterSpacing:2, fontWeight:800, marginBottom:8 }}>{catIcon} {cat.toUpperCase()} BILLS</div>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+              {catBills.map(b => (
+                <span key={b.id} style={{ padding:"4px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>
+                  #{b.bill_no} <span style={{ opacity:.65, fontWeight:600 }}>{fmt$(b.total)}</span>
+                </span>
+              ))}
+            </div>
+            <div style={{ fontSize:11, color:catColor, fontWeight:800, marginTop:8 }}>
+              Jamma: {fmt$(catBills.reduce((s,b) => s+Number(b.total), 0))}
+            </div>
+          </div>;
+        })}
         {msg && <div style={{ padding:"12px 16px", borderRadius:12, background:"#dcfce7", border:"1.5px solid #86efac", color:"#16a34a", fontSize:13, fontWeight:700, marginBottom:12, textAlign:"center" }}>{msg}</div>}
-        </div>
         {isAdmin && (
           <button className="btn fu2" onClick={settle} disabled={settling}
             style={{ width:"100%", padding:"14px", borderRadius:14, background:"linear-gradient(135deg,#1e293b,#374151)",
@@ -1587,6 +1613,19 @@ function HistorySection({ settlements }) {
                   {m}: {Number(v)>=0?"+":""}{fmt$(v)}
                 </span>
               ))}
+            </div>
+          )}
+          {s.bill_nos && (
+            <div style={{ marginTop:10 }}>
+              {["GR","EL","SP"].map(pfx => {
+                const grp = (s.bill_nos||[]).filter(n => n.startsWith(pfx));
+                if (!grp.length) return null;
+                const label = pfx==="GR"?"🛒 Groceries":pfx==="EL"?"⚡ Electricity":"✨ Special";
+                return <div key={pfx} style={{ marginBottom:6 }}>
+                  <span style={{ fontSize:10, color:"#94a3b8", fontWeight:700, marginRight:6 }}>{label}:</span>
+                  {grp.map(n => <span key={n} style={{ padding:"2px 8px", borderRadius:20, background:"#1e293b", color:"white", fontSize:10, fontWeight:900, marginRight:4, letterSpacing:1 }}>#{n}</span>)}
+                </div>;
+              })}
             </div>
           )}
         </div>
