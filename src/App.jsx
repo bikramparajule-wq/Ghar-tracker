@@ -1505,6 +1505,48 @@ function KharchaSection({ fBills, spending, catSpend, totalSpend }) {
   );
 }
 
+/* ─── BILL CATEGORY CARD (for settlement) ─────────────────────────── */
+function BillCatCard({ cat, bills }) {
+  const [expanded, setExpanded] = useState(false);
+  const catBills = bills.filter(b => b.cat === cat && b.bill_no);
+  if (catBills.length === 0) return null;
+  const catColor = CC[cat]; const catIcon = CI[cat];
+  return (
+    <div className="card fu2" style={{ padding:14, marginBottom:10, border:`1.5px solid ${catColor}33` }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, cursor:"pointer" }}
+        onClick={() => setExpanded(x => !x)}>
+        <div style={{ fontSize:11, color:catColor, letterSpacing:2, fontWeight:800 }}>{catIcon} {cat.toUpperCase()} — {catBills.length} bills</div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(catBills.reduce((s,b) => s+Number(b.total), 0))}</span>
+          <span style={{ fontSize:12, color:"#94a3b8" }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom: expanded ? 10 : 0 }}>
+        {catBills.map(b => (
+          <span key={b.id} style={{ padding:"4px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>
+            #{b.bill_no} <span style={{ opacity:.65, fontWeight:600 }}>{fmt$(b.total)}</span>
+          </span>
+        ))}
+      </div>
+      {expanded && (
+        <div style={{ borderTop:`1px solid ${catColor}22`, paddingTop:10, display:"flex", flexDirection:"column", gap:6 }}>
+          {catBills.map(b => (
+            <div key={b.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+              padding:"8px 10px", borderRadius:10, background:`${catColor}08`, border:`1px solid ${catColor}22` }}>
+              <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+                <span style={{ padding:"2px 8px", borderRadius:20, background:"#1e293b", color:"white", fontSize:10, fontWeight:900, letterSpacing:1 }}>#{b.bill_no}</span>
+                <span style={{ fontSize:11, color:"#64748b" }}>{fmtD(b.date)}</span>
+                {b.paid_by && <span style={{ fontSize:11, color:MC[b.paid_by]?.text||"#94a3b8", fontWeight:700 }}>{b.paid_by}</span>}
+              </div>
+              <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(b.total)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── SETTLEMENT SECTION ──────────────────────────────────────────── */
 function SettlementSection({ bills, isAdmin, addSettlement, user }) {
   const [partials, setPartials] = useState({});
@@ -1594,45 +1636,10 @@ function SettlementSection({ bills, isAdmin, addSettlement, user }) {
             ))}
           </div>
         )}
-        {/* Bill Numbers by Category — with date & amount */}
-        {["Groceries","Electricity","Special"].map(cat => {
-          const catBills = bills.filter(b => b.cat === cat && b.bill_no);
-          if (catBills.length === 0) return null;
-          const catColor = CC[cat]; const catIcon = CI[cat];
-          const [expanded, setExpanded] = React.useState(false);
-          return <div key={cat} className="card fu2" style={{ padding:14, marginBottom:10, border:`1.5px solid ${catColor}33` }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8, cursor:"pointer" }}
-              onClick={() => setExpanded(x => !x)}>
-              <div style={{ fontSize:11, color:catColor, letterSpacing:2, fontWeight:800 }}>{catIcon} {cat.toUpperCase()} — {catBills.length} bills</div>
-              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(catBills.reduce((s,b) => s+Number(b.total), 0))}</span>
-                <span style={{ fontSize:12, color:"#94a3b8" }}>{expanded ? "▲" : "▼"}</span>
-              </div>
-            </div>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom: expanded ? 10 : 0 }}>
-              {catBills.map(b => (
-                <span key={b.id} style={{ padding:"4px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:11, fontWeight:900, letterSpacing:1 }}>
-                  #{b.bill_no} <span style={{ opacity:.65, fontWeight:600 }}>{fmt$(b.total)}</span>
-                </span>
-              ))}
-            </div>
-            {expanded && (
-              <div style={{ borderTop:`1px solid ${catColor}22`, paddingTop:10, display:"flex", flexDirection:"column", gap:6 }}>
-                {catBills.map(b => (
-                  <div key={b.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-                    padding:"8px 10px", borderRadius:10, background:`${catColor}08`, border:`1px solid ${catColor}22` }}>
-                    <div style={{ display:"flex", gap:8, alignItems:"center" }}>
-                      <span style={{ padding:"2px 8px", borderRadius:20, background:"#1e293b", color:"white", fontSize:10, fontWeight:900, letterSpacing:1 }}>#{b.bill_no}</span>
-                      <span style={{ fontSize:11, color:"#64748b" }}>{fmtD(b.date)}</span>
-                      {b.paid_by && <span style={{ fontSize:11, color:MC[b.paid_by]?.text||"#94a3b8", fontWeight:700 }}>{b.paid_by}</span>}
-                    </div>
-                    <span style={{ fontSize:13, fontWeight:900, color:catColor }}>{fmt$(b.total)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>;
-        })}
+        {/* Bill Numbers by Category — tap gara detail herna */}
+        {["Groceries","Electricity","Special"].map(cat => (
+          <BillCatCard key={cat} cat={cat} bills={bills}/>
+        ))}
         {msg && <div style={{ padding:"12px 16px", borderRadius:12, background:"#dcfce7", border:"1.5px solid #86efac", color:"#16a34a", fontSize:13, fontWeight:700, marginBottom:12, textAlign:"center" }}>{msg}</div>}
         {isAdmin && (
           <button className="btn fu2" onClick={settle} disabled={settling}
