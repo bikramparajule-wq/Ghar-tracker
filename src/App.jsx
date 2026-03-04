@@ -468,7 +468,6 @@ export default function App() {
   };
 
   const addBill = async bill => {
-    // Global sequential numbering: GR-001, EL-002, SP-003, GR-004...
     const prefix = bill.cat === "Groceries" ? "GR" : bill.cat === "Electricity" ? "EL" : "SP";
     const allNums = bills.map(b => parseInt(b.bill_no?.split("-")[1] || "0")).filter(n => !isNaN(n));
     const nextNum = ((allNums.length > 0 ? Math.max(...allNums) : 0) + 1).toString().padStart(3, "0");
@@ -476,6 +475,25 @@ export default function App() {
     const res = await db.upsert("bills", { ...bill, bill_no, created_at: new Date().toISOString() });
     if (res?.[0]) setBills(p => [...p, res[0]]);
     else loadAll();
+    return bill_no;
+  };
+
+  // Multiple contributors → ONE bill number, splits ma sabko contribution
+  const addMultiBill = async (baseBill, contributors) => {
+    const prefix = baseBill.cat === "Groceries" ? "GR" : baseBill.cat === "Electricity" ? "EL" : "SP";
+    const allNums = bills.map(b => parseInt(b.bill_no?.split("-")[1] || "0")).filter(n => !isNaN(n));
+    const nextNum = ((allNums.length > 0 ? Math.max(...allNums) : 0) + 1).toString().padStart(3, "0");
+    const bill_no = `${prefix}-${nextNum}`;
+    const total = contributors.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+    const splits = Object.fromEntries(contributors.map(c => [c.member, parseFloat(c.amount).toFixed(2)]));
+    const paid_by = contributors.map(c => c.member).join(" + ");
+    const res = await db.upsert("bills", {
+      ...baseBill, bill_no, total, paid_by, splits,
+      created_at: new Date().toISOString()
+    });
+    if (res?.[0]) setBills(p => [...p, res[0]]);
+    else loadAll();
+    return bill_no;
   };
 
   const deleteBill = async id => { setBills(p => p.filter(b => b.id !== id)); await db.del("bills", id); };
@@ -571,7 +589,7 @@ export default function App() {
               noteData={noteData} saveNote={saveNote} groceryItems={groceryItems} addGroceryItem={addGroceryItem}
               toggleGrocery={toggleGrocery} deleteGroceryItem={deleteGroceryItem}
               taskNotes={taskNotes} addTaskNote={addTaskNote}/>}
-          {tab === "expenses" && <KharchaTab bills={bills} addBill={addBill} deleteBill={deleteBill} updateBill={updateBill}
+          {tab === "expenses" && <KharchaTab bills={bills} addBill={addBill} addMultiBill={addMultiBill} deleteBill={deleteBill} updateBill={updateBill}
               user={user} isAdmin={isAdmin} spark={spark}/>}
           {tab === "report"   && <ReportTab tasks={tasks} bills={bills} settlements={settlements} addSettlement={addSettlement} user={user} isAdmin={isAdmin}/>}
           {tab === "admin"    && isAdmin && <AdminTab perms={perms} setPerms={setPerms} pins={pins} setPins={setPins}
@@ -879,7 +897,7 @@ function TaskNotePanel({ taskId, date, notes, onAdd, user }) {
 /* ═══════════════════════════════════════════════════════════════════ */
 /*  KHARCHA TAB                                                        */
 /* ═══════════════════════════════════════════════════════════════════ */
-function KharchaTab({ bills, addBill, deleteBill, updateBill, user, isAdmin, spark }) {
+function KharchaTab({ bills, addBill, addMultiBill, deleteBill, updateBill, user, isAdmin, spark }) {
   const [sub, setSub] = useState("groceries");
   const subTabs = [
     { id: "groceries",   icon: "🛒", label: "Groceries" },
@@ -893,8 +911,8 @@ function KharchaTab({ bills, addBill, deleteBill, updateBill, user, isAdmin, spa
   return (
     <div>
       <SubTabs tabs={subTabs} active={sub} onChange={setSub} color="#0369a1" colorLight="#e0f2fe"/>
-      {sub === "groceries"   && <GroceriesForm bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
-      {sub === "electricity" && <ElectricitySection bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin}/>}
+      {sub === "groceries"   && <GroceriesForm bills={filteredBills} addBill={addBill} addMultiBill={addMultiBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
+      {sub === "electricity" && <ElectricitySection bills={filteredBills} addBill={addBill} addMultiBill={addMultiBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin}/>}
       {sub === "special"     && <SpecialSection bills={filteredBills} addBill={addBill} deleteBill={deleteBill} user={user} isAdmin={isAdmin} spark={spark}/>}
       {sub === "history"     && <BillHistory bills={bills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
     </div>
@@ -902,7 +920,7 @@ function KharchaTab({ bills, addBill, deleteBill, updateBill, user, isAdmin, spa
 }
 
 /* ─── GROCERIES FORM ──────────────────────────────────────────────── */
-function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
+function GroceriesForm({ bills, addBill, addMultiBill, deleteBill, user, isAdmin, spark }) {
   const [items, setItems]       = useState([{ name: "", amount: "" }]);
   const [paidBy, setPaid]       = useState(user !== "Admin" ? user : MEMBERS[0]);
   const [splits, setSplits]     = useState({});
@@ -911,6 +929,7 @@ function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
   const [contribs, setContribs] = useState([{ member: user !== "Admin" ? user : MEMBERS[0], amount: "" }]);
   const [note, setNote]         = useState("");
   const [saving, setSaving]     = useState(false);
+  const [savedBillNo, setSavedBillNo] = useState(null);
 
   const total       = items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
   const splitTotal  = Object.values(splits).reduce((s, v) => s + (parseFloat(v) || 0), 0);
@@ -918,25 +937,25 @@ function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
 
   const submit = async e => {
     if (!items.some(it => it.name && it.amount)) return;
-    setSaving(true);
+    setSaving(true); setSavedBillNo(null);
+    let bill_no;
     if (contribMode) {
-      // Save separate bill per contributor
       const validContribs = contribs.filter(c => parseFloat(c.amount) > 0);
-      for (const c of validContribs) {
-        await addBill({
-          cat: "Groceries", items: items.filter(it => it.name && it.amount),
-          total: parseFloat(c.amount), paid_by: c.member,
-          splits: {}, note: note || `Jamma: £${total.toFixed(2)}`, date: today(), added_by: user
-        });
-      }
+      bill_no = await addMultiBill(
+        { cat: "Groceries", items: items.filter(it => it.name && it.amount),
+          note: note || `Jamma: £${total.toFixed(2)}`, date: today(), added_by: user },
+        validContribs
+      );
       spark(e, MC[validContribs[0]?.member || paidBy].bg);
     } else {
-      await addBill({
+      bill_no = await addBill({
         cat: "Groceries", items: items.filter(it => it.name && it.amount), total, paid_by: paidBy,
         splits: splitMode ? splits : {}, note, date: today(), added_by: user
       });
       spark(e, MC[paidBy].bg);
     }
+    setSavedBillNo(bill_no);
+    setTimeout(() => setSavedBillNo(null), 5000);
     setItems([{ name: "", amount: "" }]); setNote(""); setSplits({}); setSplitMode(false);
     setContribs([{ member: user !== "Admin" ? user : MEMBERS[0], amount: "" }]); setContribMode(false);
     setSaving(false);
@@ -1065,6 +1084,13 @@ function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
             {saving?"Saving...":"SAVE ✓"}
           </button>
         </div>
+        {savedBillNo && (
+          <div style={{ marginTop:12, padding:"11px 14px", borderRadius:12, background:"#dcfce7",
+            border:"1.5px solid #86efac", display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ padding:"3px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:12, fontWeight:900, letterSpacing:1 }}>#{savedBillNo}</span>
+            <span style={{ fontSize:13, fontWeight:700, color:"#16a34a" }}>Bill save bhayo! ✅</span>
+          </div>
+        )}
       </div>
       {bills.length > 0 && <BillList bills={bills} deleteBill={deleteBill} isAdmin={isAdmin}/>}
     </div>
@@ -1072,23 +1098,33 @@ function GroceriesForm({ bills, addBill, deleteBill, user, isAdmin, spark }) {
 }
 
 /* ─── ELECTRICITY SECTION ─────────────────────────────────────────── */
-function ElectricitySection({ bills, addBill, deleteBill, user, isAdmin }) {
+function ElectricitySection({ bills, addBill, addMultiBill, deleteBill, user, isAdmin }) {
   const [entries, setEntries] = useState([{ member: user !== "Admin" ? user : MEMBERS[0], amount: "" }]);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savedBillNo, setSavedBillNo] = useState(null);
 
   const total = entries.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
 
   const submit = async () => {
     if (!entries.some(e => e.amount)) return;
-    setSaving(true);
+    setSaving(true); setSavedBillNo(null);
     const validEntries = entries.filter(e => parseFloat(e.amount) > 0);
-    for (const entry of validEntries) {
-      await addBill({
-        cat: "Electricity", items: [], total: parseFloat(entry.amount),
-        paid_by: entry.member, splits: {}, note: note || "", date: today(), added_by: user
+    let bill_no;
+    if (validEntries.length > 1) {
+      // Multiple contributors → ONE bill number
+      bill_no = await addMultiBill(
+        { cat: "Electricity", items: [], note: note || "", date: today(), added_by: user },
+        validEntries
+      );
+    } else {
+      bill_no = await addBill({
+        cat: "Electricity", items: [], total: parseFloat(validEntries[0].amount),
+        paid_by: validEntries[0].member, splits: {}, note: note || "", date: today(), added_by: user
       });
     }
+    setSavedBillNo(bill_no);
+    setTimeout(() => setSavedBillNo(null), 5000);
     setEntries([{ member: user !== "Admin" ? user : MEMBERS[0], amount: "" }]);
     setNote(""); setSaving(false);
   };
@@ -1127,6 +1163,13 @@ function ElectricitySection({ bills, addBill, deleteBill, user, isAdmin }) {
             {saving?"Saving...":"SAVE ⚡"}
           </button>
         </div>
+        {savedBillNo && (
+          <div style={{ marginTop:12, padding:"11px 14px", borderRadius:12, background:"#fef3c7",
+            border:"1.5px solid #fcd34d", display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ padding:"3px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:12, fontWeight:900, letterSpacing:1 }}>#{savedBillNo}</span>
+            <span style={{ fontSize:13, fontWeight:700, color:"#d97706" }}>Bill save bhayo! ✅</span>
+          </div>
+        )}
       </div>
       {/* Show electricity bills */}
       {bills.length > 0 && (
@@ -1165,6 +1208,7 @@ function SpecialSection({ bills, addBill, deleteBill, user, isAdmin, spark }) {
   const [customSplits, setCustomSplits] = useState({});
   const [splitEqual, setSplitEqual] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savedBillNo, setSavedBillNo] = useState(null);
 
   const total = parseFloat(totalAmt) || 0;
   const perPerson = selMembers.length > 0 ? total / selMembers.length : 0;
@@ -1174,13 +1218,15 @@ function SpecialSection({ bills, addBill, deleteBill, user, isAdmin, spark }) {
 
   const submit = async e => {
     if (!desc || !total || selMembers.length === 0) return;
-    setSaving(true);
+    setSaving(true); setSavedBillNo(null);
     const sp = splitEqual
       ? Object.fromEntries(selMembers.map(m => [m, perPerson.toFixed(2)]))
       : customSplits;
-    await addBill({ cat:"Special", items:[{ name:desc, amount:totalAmt }], total,
+    const bill_no = await addBill({ cat:"Special", items:[{ name:desc, amount:totalAmt }], total,
       paid_by:paidBy, splits:sp, note:`Members: ${selMembers.join(", ")}`, date:today(), added_by:user });
     spark(e, MC[paidBy].bg);
+    setSavedBillNo(bill_no);
+    setTimeout(() => setSavedBillNo(null), 5000);
     setDesc(""); setTotalAmt(""); setSelMembers([]); setCustomSplits({}); setSplitEqual(true);
     setSaving(false);
   };
@@ -1230,6 +1276,13 @@ function SpecialSection({ bills, addBill, deleteBill, user, isAdmin, spark }) {
               opacity:saving||!desc||!total||selMembers.length===0?.6:1 }}>
             {saving?"Saving...":"SAVE ✨"}
           </button>
+          {savedBillNo && (
+            <div style={{ marginTop:12, padding:"11px 14px", borderRadius:12, background:"#fdf2f8",
+              border:"1.5px solid #fbcfe8", display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ padding:"3px 10px", borderRadius:20, background:"#1e293b", color:"white", fontSize:12, fontWeight:900, letterSpacing:1 }}>#{savedBillNo}</span>
+              <span style={{ fontSize:13, fontWeight:700, color:"#db2777" }}>Bill save bhayo! ✅</span>
+            </div>
+          )}
         </>}
         {selMembers.length === 0 && <div style={{ textAlign:"center", color:"#94a3b8", fontSize:13, padding:"10px 0" }}>Pahile members select gara</div>}
       </div>
