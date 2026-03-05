@@ -1415,7 +1415,15 @@ function ReportTab({ tasks, bills, settlements, addSettlement, user, isAdmin }) 
 
   const spending = Object.fromEntries(MEMBERS.map(m => [m, 0]));
   const catSpend = Object.fromEntries(CATS.map(c => [c, 0]));
-  fBills.forEach(b => { spending[b.paid_by] = (spending[b.paid_by]||0) + Number(b.total); catSpend[b.cat] = (catSpend[b.cat]||0) + Number(b.total); });
+  fBills.forEach(b => {
+    const isMulti = b.paid_by?.includes("+") && b.splits && Object.keys(b.splits).length > 0;
+    if (isMulti) {
+      Object.entries(b.splits).forEach(([m, v]) => { if (MEMBERS.includes(m)) spending[m] = (spending[m]||0) + parseFloat(v||0); });
+    } else {
+      if (MEMBERS.includes(b.paid_by)) spending[b.paid_by] = (spending[b.paid_by]||0) + Number(b.total);
+    }
+    catSpend[b.cat] = (catSpend[b.cat]||0) + Number(b.total);
+  });
   const totalSpend = Object.values(spending).reduce((s, v) => s + v, 0);
   const avgSpend = totalSpend / MEMBERS.length;
 
@@ -1778,8 +1786,14 @@ function PersonalSection({ bills, tasks, user, inRange }) {
   const [selMember, setSelMember] = useState(user !== "Admin" ? user : MEMBERS[0]);
   const mc = MC[selMember];
 
-  const myBills = bills.filter(b => b.paid_by === selMember);
-  const myTotal = myBills.reduce((s, b) => s + Number(b.total), 0);
+  const myBills = bills.filter(b => {
+    const isMulti = b.paid_by?.includes("+") && b.splits && Object.keys(b.splits).length > 0;
+    return isMulti ? (b.splits[selMember] && parseFloat(b.splits[selMember]) > 0) : b.paid_by === selMember;
+  });
+  const myTotal = myBills.reduce((s, b) => {
+    const isMulti = b.paid_by?.includes("+") && b.splits;
+    return s + (isMulti ? parseFloat(b.splits[selMember]||0) : Number(b.total));
+  }, 0);
 
   const myTasks = Object.fromEntries([...DTASKS,...WTASKS].map(t => [t.id, 0]));
   Object.entries(tasks).forEach(([date, dt]) => {
@@ -2027,7 +2041,15 @@ function AnalyticsSection({ bills, tasks }) {
   const itemFreq = {};
   bills.forEach(b => (b.items||[]).forEach(it => { if(it.name) itemFreq[it.name] = (itemFreq[it.name]||0)+1; }));
   const topItems = Object.entries(itemFreq).sort((a,b) => b[1]-a[1]).slice(0,8);
-  const totalByM = Object.fromEntries(MEMBERS.map(m => [m, bills.filter(b => b.paid_by===m).reduce((s,b) => s+Number(b.total), 0)]));
+  const totalByM = Object.fromEntries(MEMBERS.map(m => [m, 0]));
+  bills.forEach(b => {
+    const isMulti = b.paid_by?.includes("+") && b.splits && Object.keys(b.splits).length > 0;
+    if (isMulti) {
+      Object.entries(b.splits).forEach(([mem, v]) => { if (MEMBERS.includes(mem)) totalByM[mem] += parseFloat(v||0); });
+    } else {
+      if (MEMBERS.includes(b.paid_by)) totalByM[b.paid_by] += Number(b.total);
+    }
+  });
   const taskByM  = Object.fromEntries(MEMBERS.map(m => [m, 0]));
   Object.values(tasks).forEach(dt => Object.values(dt).forEach(v => { if(v && taskByM[v]!==undefined) taskByM[v]++; }));
 
